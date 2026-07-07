@@ -15,49 +15,6 @@ export const FrameworkSchema = z
     "Build framework hint. 'auto' detects from package.json / index.html; the others pin a specific framework for Cloudflare Pages.",
   );
 
-// ---- Patch manifest (used by update_site) ---------------------------------
-
-/**
- * Filesystem-safe path regex: alphanumerics, dot, underscore, hyphen, slash.
- * No leading slash. The `..` segment check is enforced separately for
- * defense-in-depth (see sanitizeFilePath in update.ts).
- */
-export const FILE_PATH_RE = /^[a-zA-Z0-9._/-]+$/;
-export const FILE_PATH_DESC =
-  "Filesystem-safe path within the site, e.g. 'index.html' or 'assets/logo.svg'.";
-
-export const PatchCreateSchema = z.object({
-  op: z.literal("create"),
-  file: z.string().regex(FILE_PATH_RE, "file must match /^[a-zA-Z0-9._/-]+$/"),
-  content: z.string().describe("Full file content to write."),
-});
-export const PatchReplaceSchema = z.object({
-  op: z.literal("replace"),
-  file: z.string().regex(FILE_PATH_RE, "file must match /^[a-zA-Z0-9._/-]+$/"),
-  find: z.string().min(1).describe("Exact substring to replace (first occurrence)."),
-  value: z.string().describe("Replacement text."),
-});
-export const PatchReplaceAllSchema = z.object({
-  op: z.literal("replace_all"),
-  file: z.string().regex(FILE_PATH_RE, "file must match /^[a-zA-Z0-9._/-]+$/"),
-  find: z.string().min(1).describe("Exact substring to replace (every occurrence)."),
-  value: z.string().describe("Replacement text."),
-});
-export const PatchDeleteSchema = z.object({
-  op: z.literal("delete"),
-  file: z.string().regex(FILE_PATH_RE, "file must match /^[a-zA-Z0-9._/-]+$/"),
-});
-
-export const PatchOpSchema = z.discriminatedUnion("op", [
-  PatchCreateSchema,
-  PatchReplaceSchema,
-  PatchReplaceAllSchema,
-  PatchDeleteSchema,
-]);
-export type PatchOp = z.infer<typeof PatchOpSchema>;
-
-// ---- Tool inputs ----------------------------------------------------------
-
 export const ShipSiteInputSchema = z.object({
   folder: z
     .string()
@@ -73,66 +30,6 @@ export const ShipSiteInputSchema = z.object({
   framework: FrameworkSchema,
 });
 export type ShipSiteInput = z.infer<typeof ShipSiteInputSchema>;
-
-export const GetCurrentSiteInputSchema = z.object({
-  domain: z
-    .string()
-    .min(1)
-    .regex(/^[a-z0-9.-]+$/i, "domain must be a valid hostname")
-    .describe("Domain to inspect (e.g. 'shop.example.com')."),
-  include_content: z
-    .boolean()
-    .default(true)
-    .describe(
-      "Whether to include file contents in the response. Set false to fetch only the file tree + hashes (saves bandwidth).",
-    ),
-});
-export type GetCurrentSiteInput = z.infer<typeof GetCurrentSiteInputSchema>;
-
-export const UpdateSiteInputSchema = z.object({
-  domain: z
-    .string()
-    .min(1)
-    .regex(/^[a-z0-9.-]+$/i, "domain must be a valid hostname")
-    .describe("Domain whose deployed site you want to edit."),
-  patches: z
-    .array(PatchOpSchema)
-    .min(1)
-    .max(50, "max 50 patches per request")
-    .describe(
-      "Patch operations applied in order to the live site (max 50). Each becomes part of a versioned deploy.",
-    ),
-  message: z
-    .string()
-    .max(500)
-    .optional()
-    .describe("Optional human-readable note stored in the audit log."),
-  dry_run: z
-    .boolean()
-    .default(false)
-    .describe("If true, validate patches and return what would change without deploying."),
-});
-export type UpdateSiteInput = z.infer<typeof UpdateSiteInputSchema>;
-
-export const ListFileVersionsInputSchema = z.object({
-  domain: z
-    .string()
-    .min(1)
-    .regex(/^[a-z0-9.-]+$/i, "domain must be a valid hostname")
-    .describe("Domain to inspect."),
-  file: z
-    .string()
-    .regex(FILE_PATH_RE, "file must match /^[a-zA-Z0-9._/-]+$/")
-    .describe("Path within the site, e.g. 'about.html'."),
-  limit: z
-    .number()
-    .int()
-    .positive()
-    .max(100)
-    .default(10)
-    .describe("Maximum number of versions to return (default 10)."),
-});
-export type ListFileVersionsInput = z.infer<typeof ListFileVersionsInputSchema>;
 
 export const ListDeploysInputSchema = z.object({
   domain: z
@@ -153,7 +50,7 @@ export const GetLogsInputSchema = z.object({
   deploy_id: z
     .string()
     .regex(/^dep_[a-z0-9_]+$/, "deploy_id must start with 'dep_'")
-    .describe("The deploy ID returned from ship_site or update_site."),
+    .describe("The deploy ID returned from ship_site."),
 });
 export type GetLogsInput = z.infer<typeof GetLogsInputSchema>;
 
@@ -179,6 +76,101 @@ export type SetEnvInput = z.infer<typeof SetEnvInputSchema>;
 export const GetStatusInputSchema = z.object({});
 export type GetStatusInput = z.infer<typeof GetStatusInputSchema>;
 
+// ---- Conversational edit tools (list_files / read_file / edit_file) -------
+
+const DeployIdField = z
+  .string()
+  .regex(/^dep_[a-z0-9_]+$/, "deploy_id must start with 'dep_' and contain only [a-z0-9_]");
+
+// Files inside a deploy: relative paths only — letters, digits, '.', '_', '-', '/'.
+const FilePathField = z
+  .string()
+  .min(1)
+  .max(512)
+  .regex(/^[a-zA-Z0-9._/-]+$/, "file path may only contain letters, digits, '.', '_', '-', '/'")
+  .refine((p) => !p.includes(".."), "file path may not contain '..'")
+  .refine((p) => !p.startsWith("/"), "file path may not start with '/'");
+
+export const ListFilesInputSchema = z.object({
+  deploy_id: DeployIdField.describe(
+    "The deploy_id to list files for. Must match dep_<base36>_<base36>.",
+  ),
+});
+export type ListFilesInput = z.infer<typeof ListFilesInputSchema>;
+
+export const ReadFileInputSchema = z.object({
+  deploy_id: DeployIdField.describe("The deploy_id that contains the file."),
+  path: FilePathField.describe(
+    "Path to the file inside the deploy, e.g. 'index.html' or 'assets/logo.svg'. No leading slash, no '..'.",
+  ),
+});
+export type ReadFileInput = z.infer<typeof ReadFileInputSchema>;
+
+export const EditFileInputSchema = z
+  .object({
+    deploy_id: DeployIdField.describe(
+      "The base deploy_id to patch on top of (the deploy whose file tree you're editing).",
+    ),
+    op: z
+      .enum(["create", "replace", "replace_all", "delete"])
+      .describe(
+        "Patch operation: 'create' = new file (requires value/content), " +
+          "'replace' = first match only (requires find + value), " +
+          "'replace_all' = every match (requires find + value), " +
+          "'delete' = remove the file.",
+      ),
+    file: FilePathField.describe("Path of the file to create/replace/delete."),
+    find: z
+      .string()
+      .optional()
+      .describe(
+        "For replace/replace_all: the exact substring to find inside `file`'s current content.",
+      ),
+    value: z
+      .string()
+      .optional()
+      .describe("For create/replace/replace_all: the new text."),
+    content: z
+      .string()
+      .optional()
+      .describe(
+        "Alias for `value`, kept for ergonomics on 'create'. If both `value` and `content` are given, `value` wins.",
+      ),
+    message: z
+      .string()
+      .max(500)
+      .optional()
+      .describe("Optional human-readable note stored alongside the patch deploy."),
+  })
+  .superRefine((data, ctx) => {
+    const needsFind =
+      data.op === "replace" || data.op === "replace_all";
+    if (needsFind && (data.find === undefined || data.find.length === 0)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["find"],
+        message: `op '${data.op}' requires a non-empty 'find' string`,
+      });
+    }
+    const needsContent =
+      data.op === "create" || data.op === "replace" || data.op === "replace_all";
+    if (needsContent && data.value === undefined && data.content === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["value"],
+        message: `op '${data.op}' requires 'value' (or 'content')`,
+      });
+    }
+    if (data.op === "delete" && (data.find !== undefined || data.value !== undefined || data.content !== undefined)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["op"],
+        message: "op 'delete' takes no 'find' or 'value' — just 'file'",
+      });
+    }
+  });
+export type EditFileInput = z.infer<typeof EditFileInputSchema>;
+
 // ---- Output shapes ----------------------------------------------------------
 
 export interface DeployRecord {
@@ -189,8 +181,6 @@ export interface DeployRecord {
   status: "queued" | "uploading" | "building" | "ready" | "error";
   preview_url: string;
   created_at: string;
-  parent_deploy_id?: string | null;
-  message?: string;
   error?: string;
 }
 
@@ -200,44 +190,4 @@ export interface StatusReport {
   platform: string;
   api_url: string;
   state_dir: string;
-}
-
-export interface CurrentSiteFile {
-  path: string;
-  size: number;
-  sha256: string;
-  content?: string;
-}
-
-export interface CurrentSiteResponse {
-  domain: string;
-  deploy_id: string;
-  created_at: string;
-  files: CurrentSiteFile[];
-}
-
-export interface PatchResponse {
-  deploy_id: string;
-  parent_deploy_id: string | null;
-  domain: string;
-  files_changed: number;
-  bytes_changed: number;
-  quota_used: number;
-  preview_url: string;
-  status: "queued" | "building" | "ready" | "error";
-  message?: string;
-}
-
-export interface FileVersionEntry {
-  deploy_id: string;
-  parent_deploy_id: string | null;
-  created_at: string;
-  message?: string;
-  diff?: string;
-}
-
-export interface FileVersionsResponse {
-  domain: string;
-  file: string;
-  history: FileVersionEntry[];
 }

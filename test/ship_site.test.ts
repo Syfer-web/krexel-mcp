@@ -182,6 +182,93 @@ test("uploadToApi parses JSON on 200", async () => {
   assert.deepEqual(res.body, { deploy_id: "dep_abc_xyz", status: "queued" });
 });
 
+// Regression test for Bug #1: ship_site MUST forward the user's KREXEL_API_KEY
+// to the worker as `Authorization: Bearer <key>`. Without this, every ship
+// returns 401 even when the key is correct.
+test("uploadToApi forwards `Authorization: Bearer <key>` when KREXEL_API_KEY is set", async () => {
+  let captured: { headers: Record<string, string> } | null = null;
+  const fakeFetch: typeof fetch = (async (_url, init) => {
+    captured = { headers: (init?.headers ?? {}) as Record<string, string> };
+    return new Response(JSON.stringify({ deploy_id: "dep_ok", status: "queued" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }) as unknown as typeof fetch;
+  const savedKey = process.env.KREXEL_API_KEY;
+  process.env.KREXEL_API_KEY = "krexel_user_smoke_key";
+  try {
+    await uploadToApi({
+      apiUrl: "http://localhost:8787",
+      deployId: generateDeployId(),
+      domain: "x.test",
+      framework: "static",
+      zipBytes: Buffer.from("x"),
+      zipPath: "/tmp/x.zip",
+      fetcher: fakeFetch,
+    });
+    assert.ok(captured, "fetch was not called");
+    assert.equal(captured!.headers.Authorization, "Bearer krexel_user_smoke_key");
+  } finally {
+    if (savedKey === undefined) delete process.env.KREXEL_API_KEY;
+    else process.env.KREXEL_API_KEY = savedKey;
+  }
+});
+
+test("uploadToApi accepts an explicit apiKey option that overrides env", async () => {
+  let captured: { headers: Record<string, string> } | null = null;
+  const fakeFetch: typeof fetch = (async (_url, init) => {
+    captured = { headers: (init?.headers ?? {}) as Record<string, string> };
+    return new Response("{}", { status: 200 });
+  }) as unknown as typeof fetch;
+  const savedKey = process.env.KREXEL_API_KEY;
+  process.env.KREXEL_API_KEY = "should_not_be_used";
+  try {
+    await uploadToApi({
+      apiUrl: "http://localhost:8787",
+      deployId: generateDeployId(),
+      domain: "x.test",
+      framework: "static",
+      zipBytes: Buffer.from("x"),
+      zipPath: "/tmp/x.zip",
+      fetcher: fakeFetch,
+      apiKey: "krexel_explicit_key",
+    });
+    assert.equal(captured!.headers.Authorization, "Bearer krexel_explicit_key");
+  } finally {
+    if (savedKey === undefined) delete process.env.KREXEL_API_KEY;
+    else process.env.KREXEL_API_KEY = savedKey;
+  }
+});
+
+test("uploadToApi sends NO Authorization header when no key is configured", async () => {
+  let captured: { headers: Record<string, string> } | null = null;
+  const fakeFetch: typeof fetch = (async (_url, init) => {
+    captured = { headers: (init?.headers ?? {}) as Record<string, string> };
+    return new Response("{}", { status: 401 });
+  }) as unknown as typeof fetch;
+  const savedKey = process.env.KREXEL_API_KEY;
+  delete process.env.KREXEL_API_KEY;
+  try {
+    await uploadToApi({
+      apiUrl: "http://localhost:8787",
+      deployId: generateDeployId(),
+      domain: "x.test",
+      framework: "static",
+      zipBytes: Buffer.from("x"),
+      zipPath: "/tmp/x.zip",
+      fetcher: fakeFetch,
+    });
+    assert.ok(captured);
+    assert.equal(
+      captured!.headers.Authorization ?? "",
+      "",
+      "expected no Authorization header when KREXEL_API_KEY is unset",
+    );
+  } finally {
+    if (savedKey !== undefined) process.env.KREXEL_API_KEY = savedKey;
+  }
+});
+
 // ---------------------------------------------------------------------------
 // shipSite end-to-end
 // ---------------------------------------------------------------------------

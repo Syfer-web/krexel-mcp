@@ -1,27 +1,40 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.Syfer-web/krexel-mcp",
-  "description": "MCP server for Krexel — ship and edit websites from any AI assistant that speaks MCP.",
+  "description": "Ship AND edit static sites from any MCP-compatible AI assistant. Deploy, edit, list, rollback, logs, env. The AI is the brain; Krexel is the hands.",
   "repository": {
-      "url": "https://github.com/Syfer-web/krexel-mcp",
-      "source": "github"
-    },
-  "version": "0.2.0",
+    "url": "https://github.com/Syfer-web/krexel-mcp",
+    "source": "github"
+  },
+  "version": "0.3.1",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "krexel-mcp",
-      "version": "0.2.0",
+      "version": "0.3.1",
       "transport": {
         "type": "stdio"
       },
-      "environmentVariables": [
+      "environment_variables": [
         {
-          "description": "Your API key for the service",
-          "isRequired": true,
-          "format": "string",
-          "isSecret": true,
-          "name": "YOUR_API_KEY"
+          "description": "Base URL of the Krexel orchestrator API.",
+          "name": "KREXEL_API_URL",
+          "is_required": false,
+          "default": "http://localhost:8787"
+        },
+        {
+          "description": "Account API key minted at krexel.com/signup. Forwarded as Authorization: Bearer *** to every API call. Required.",
+          "name": "KREXEL_API_KEY",
+          "is_required": true,
+          "format": "secret",
+          "is_secret": true
+        },
+        {
+          "description": "32-byte hex master key used to encrypt domain env vars (AES-256-GCM). Required only for set_env.",
+          "name": "KREXEL_MASTER_KEY",
+          "is_required": false,
+          "format": "secret",
+          "is_secret": true
         }
       ]
     }

@@ -229,6 +229,8 @@ export interface ApiUploadOpts {
   zipPath: string;
   // Injectable for tests so we don't actually open a socket.
   fetcher?: typeof fetch;
+  /** API key forwarded as `Authorization: Bearer ...`. Falls back to $KREXEL_API_KEY. */
+  apiKey?: string;
 }
 
 export interface ApiResponse {
@@ -272,10 +274,17 @@ export async function uploadToApi(opts: ApiUploadOpts): Promise<ApiResponse> {
     "manifest.json",
   );
   form.append("file", new Blob([new Uint8Array(opts.zipBytes)]), path.basename(opts.zipPath));
+  // Bug #1 fix: the worker requires `Authorization: Bearer <KREXEL_API_KEY>`
+  // on every authed endpoint. The MCP server is spawned with the user's key
+  // in its env, so we forward it here.
+  const apiKey = opts.apiKey ?? process.env.KREXEL_API_KEY ?? "";
+  const headers: Record<string, string> = {};
+  if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
   try {
     const res = await doFetch(url, {
       method: "POST",
-      body: form as unknown as RequestInit["body"],
+      body: form as unknown as BodyInit,
+      headers,
     });
     const raw = await res.text();
     let body: unknown = raw;

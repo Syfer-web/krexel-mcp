@@ -1,13 +1,13 @@
 # krexel-mcp
 
-> Ship and edit websites from any AI assistant that speaks the
+> Ship AND edit static sites from any AI assistant that speaks the
 > [Model Context Protocol](https://modelcontextprotocol.io/).
 
 `krexel-mcp` is the official MCP server for
-[Krexel](https://www.npmjs.com/package/krexel) — a "deploy a website" API for
-AI agents. Point any MCP-compatible client (Claude Desktop, Cursor, etc.) at
-this server and you can build, deploy, edit, list, rollback, and inspect sites
-by talking to your assistant.
+[Krexel](https://krexel.com) — a "your AI ships and edits your live site"
+API. Point any MCP-compatible client (Claude Desktop, Cursor, Windsurf,
+VS Code) at this server and your assistant can deploy, list, edit,
+rollback, and inspect sites just by talking.
 
 ## Quickstart
 
@@ -21,7 +21,7 @@ Add `krexel-mcp` to your MCP client configuration:
       "args": ["-y", "krexel-mcp"],
       "env": {
         "KREXEL_API_URL": "https://api.krexel.com",
-        "KREXEL_API_KEY": "krx_live_…",
+        "KREXEL_API_KEY": "krx_live_••••••••••••••••",
         "KREXEL_MASTER_KEY": "<your-32-byte-hex-key>"
       }
     }
@@ -33,56 +33,39 @@ Restart your client. The assistant now sees nine Krexel tools.
 
 ## Tools
 
-| Tool                  | What it does                                                                  |
-|-----------------------|-------------------------------------------------------------------------------|
-| `ship_site`           | Upload a built site folder (1.0 quota). Returns a `deploy_id` and preview URL. |
-| `update_site`         | Edit a deployed site in place (0.1 quota). Applies a patch manifest.          |
-| `get_current_site`    | Read the live file tree + contents for a domain.                              |
-| `list_file_versions`  | Show version history + unified diffs for a single file on a domain.           |
-| `list_deploys`        | List recent deploys from local state. Optional domain filter.                 |
-| `get_logs`            | Fetch build logs for a deploy (streams from the orchestrator).                |
-| `rollback`            | Roll back a domain to a previous deploy (real alias switch).                  |
-| `set_env`             | Encrypt and persist an env var for a domain (AES-256-GCM).                    |
-| `get_status`          | Return account, deploy count, and state directory.                            |
+| Tool           | What it does                                                                |
+|----------------|-----------------------------------------------------------------------------|
+| `ship_site`    | Upload a built site folder. Returns a `deploy_id` and preview URL.          |
+| `edit_file`    | Patch a deployed site (create / replace / replace_all / delete). 0.1 deploy. |
+| `list_files`   | List the files in a deployed site (path + size + sha256).                   |
+| `read_file`    | Read one file's content from a deployed site.                               |
+| `list_deploys` | List recent deploys from local state. Optional domain filter.               |
+| `get_logs`     | Fetch build logs for a deploy.                                              |
+| `rollback`     | Mark a previous deploy as the current good version.                         |
+| `set_env`      | Encrypt and persist an env var for a domain (AES-256-GCM).                  |
+| `get_status`   | Return account, deploy count, plan, and state directory.                    |
 
-### Conversational edit-and-deploy workflow
+### The conversational-edit flow
 
-The new `update_site` tool lets your assistant edit a deployed site
-conversationally. Each edit counts as **0.1 deploy** against the monthly quota
-(vs. **1.0** for a full `ship_site`), so a free-tier user can do up to
-**100 AI edits per month**.
+1. AI calls `list_files(deploy_id)` to see what files exist on the site.
+2. AI calls `read_file(deploy_id, path)` to read the file it wants to change.
+3. AI generates the new content itself, then calls
+   `edit_file(deploy_id, op: "replace", file, find, value, message)`.
+4. Krexel ships the patch as a new deploy — live in ~8 seconds, 0.1 deploy
+   against the customer's quota. The new `deploy_id` and `parent_deploy_id`
+   are returned so the AI can chain further edits on top.
 
-The recommended flow:
-
-1. **Read** the live file via `get_current_site(domain="alex.dev")`. This
-   returns the file tree, sha256 hashes, and (by default) full contents.
-2. **Patch** the file via `update_site(domain, patches=[…])`. The patch's
-   `find` must appear verbatim in the live file — read first, then edit.
-3. **Verify** with `list_file_versions(domain, file="about.html")` to see
-   the diff your last edit produced.
-
-Example patch op shapes:
-
-```jsonc
-{ "op": "create",       "file": "new.html", "content": "<h1>x</h1>" }
-{ "op": "replace",       "file": "about.html", "find": "About", "value": "About Us" }
-{ "op": "replace_all",   "file": "style.css",  "find": "red",   "value": "blue" }
-{ "op": "delete",        "file": "old.html" }
-```
-
-Every patch becomes a real versioned deploy — `rollback` works the same as
-for full deploys, and the audit trail records `parent_deploy_id` for each
-edit.
+The AI is the brain. Krexel is the hands.
 
 All tools take plain JSON arguments and return JSON. Tool schemas are
 discoverable via the standard MCP `tools/list` request.
 
 ## Configuration
 
-| Env var               | Required | Default              | Notes                                    |
-|-----------------------|----------|----------------------|------------------------------------------|
-| `KREXEL_API_URL`      | no       | `http://localhost:8787` | Base URL of the Krexel orchestrator API. |
-| `KREXEL_API_KEY`      | no       | —                    | Bearer token (`krx_live_…`) for API auth. |
+| Env var               | Required | Default              | Notes                                          |
+|-----------------------|----------|----------------------|------------------------------------------------|
+| `KREXEL_API_URL`      | no       | `http://localhost:8787` | Base URL of the Krexel orchestrator API.     |
+| `KREXEL_API_KEY`      | yes      | —                    | Account API key (minted at krexel.com/signup). Forwarded as `Authorization: Bearer *** to every API call. |
 | `KREXEL_MASTER_KEY`   | yes*     | —                    | 32-byte hex string for env-var encryption. *Required for `set_env`. |
 
 State files are written under `$KREXEL_HOME` (default `~/.krexel/`).
