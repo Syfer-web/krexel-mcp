@@ -275,7 +275,7 @@ export async function uploadToApi(opts: ApiUploadOpts): Promise<ApiResponse> {
   try {
     const res = await doFetch(url, {
       method: "POST",
-      body: form as unknown as BodyInit,
+      body: form as unknown as RequestInit["body"],
     });
     const raw = await res.text();
     let body: unknown = raw;

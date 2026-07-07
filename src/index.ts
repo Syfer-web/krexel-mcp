@@ -3,7 +3,8 @@
  * Krexel MCP server — stdio transport.
  *
  * Tools exposed:
- *   ship_site, list_deploys, get_logs, rollback, set_env, get_status
+ *   ship_site, update_site, get_current_site, list_file_versions,
+ *   list_deploys, get_logs, rollback, set_env, get_status
  *
  * State lives in $KREXEL_HOME (default ~/.krexel). See state.ts.
  */
@@ -18,6 +19,9 @@ import { ZodError } from "zod";
 
 import {
   ShipSiteInputSchema,
+  GetCurrentSiteInputSchema,
+  UpdateSiteInputSchema,
+  ListFileVersionsInputSchema,
   ListDeploysInputSchema,
   GetLogsInputSchema,
   RollbackInputSchema,
@@ -39,14 +43,28 @@ import {
   uploadDirFor,
 } from "./state.js";
 import { shipSite, verifyFolder } from "./ship.js";
+import {
+  buildPatchManifest,
+  fetchCurrentSite,
+  fetchFileVersions,
+  fetchLogs,
+  PATCH_QUOTA_COST,
+  postPatch,
+  postRollback,
+} from "./update.js";
+import { buildFileVersionsResponse } from "./version.js";
 
 const SERVER_NAME = "krexel-mcp";
-const SERVER_VERSION = "0.1.0";
+const SERVER_VERSION = "0.2.0";
 
 const server = new Server(
   { name: SERVER_NAME, version: SERVER_VERSION },
   { capabilities: { tools: {} } },
 );
+
+function apiUrl(): string {
+  return process.env.KREXEL_API_URL ?? "http://localhost:8787";
+}
 
 // -----------------------------------------------------------------------------
 // Tool registry
@@ -57,10 +75,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "ship_site",
       description:
-        "Upload a built site folder to Krexel. Zips the folder, stages it locally, " +
-        "and POSTs to the Krexel orchestrator API. Returns a deploy_id (always) and " +
-        "preview_url. If the orchestrator is unreachable the response carries an " +
-        "`api_ok: false` flag with the upstream error — never fakes success.",
+        "Upload a built site folder to Krexel. Counts as 1.0 against your monthly quota. " +
+        "For editing an existing deployed site, use update_site instead — it's faster and " +
+        "uses 0.1 quota. Zips the folder, stages it locally, and POSTs to the Krexel " +
+        "orchestrator API. Returns a deploy_id (always) and preview_url. If the orchestrator " +
+        "is unreachable the response carries an `api_ok: false` flag with the upstream " +
+        "error — never fakes success.",
       inputSchema: {
         type: "object",
         properties: {
@@ -82,6 +102,98 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
+      name: "get_current_site",
+      description:
+        "Read the live deployed file tree for a domain — last good deploy's files, sizes, " +
+        "and sha256 hashes (and contents unless include_content=false). " +
+        "BEFORE calling update_site, you MUST call get_current_site to read the exact current " +
+        "contents of the file you want to edit — the patch 'replace' / 'replace_all' ops " +
+        "require an exact substring match against the live file, otherwise the deploy fails. " +
+        "Workflow: get_current_site → identify file → construct find/value from its current " +
+        "content → update_site.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          domain: {
+            type: "string",
+            description: "Domain to inspect (e.g. 'shop.example.com').",
+          },
+          include_content: {
+            type: "boolean",
+            default: true,
+            description:
+              "Set false to fetch only the file tree + hashes (smaller payload). Default true.",
+          },
+        },
+        required: ["domain"],
+      },
+    },
+    {
+      name: "update_site",
+      description:
+        "For editing an existing deployed site. Counts as 0.1 against your monthly quota " +
+        "(vs 1.0 for ship_site). Use get_current_site first to read the file — patch " +
+        "ops need an exact substring match. Each call becomes a real versioned deploy " +
+        "(parent_deploy_id recorded) so rollback works the same as for full deploys. " +
+        "Pass dry_run=true to validate without deploying.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          domain: {
+            type: "string",
+            description: "Domain whose deployed site you want to edit.",
+          },
+          patches: {
+            type: "array",
+            description: "Patch operations applied in order (max 50).",
+            items: {
+              type: "object",
+              properties: {
+                op: {
+                  type: "string",
+                  enum: ["create", "replace", "replace_all", "delete"],
+                },
+                file: { type: "string" },
+              },
+              required: ["op", "file"],
+            },
+          },
+          message: {
+            type: "string",
+            description: "Optional audit-log note (max 500 chars).",
+          },
+          dry_run: {
+            type: "boolean",
+            default: false,
+            description: "If true, validate patches without deploying.",
+          },
+        },
+        required: ["domain", "patches"],
+      },
+    },
+    {
+      name: "list_file_versions",
+      description:
+        "Show version history for a single file on a domain — when it changed and the unified " +
+        "diff between consecutive versions. Useful for 'what did my last edit actually change?'",
+      inputSchema: {
+        type: "object",
+        properties: {
+          domain: { type: "string" },
+          file: {
+            type: "string",
+            description: "Path within the site, e.g. 'about.html'.",
+          },
+          limit: {
+            type: "number",
+            default: 10,
+            description: "Maximum number of versions to return (default 10).",
+          },
+        },
+        required: ["domain", "file"],
+      },
+    },
+    {
       name: "list_deploys",
       description:
         "List recent deploys from the local Krexel state file. Optionally filter by domain.",
@@ -96,8 +208,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "get_logs",
       description:
-        "Get build logs for a deploy. In Phase 1 these are mocked from the local " +
-        "manifest; Phase 2 will stream from the orchestrator.",
+        "Fetch build logs for a deploy. Now streams from the Krexel orchestrator when " +
+        "reachable; falls back to the local manifest summary if the API is down.",
       inputSchema: {
         type: "object",
         properties: {
@@ -109,8 +221,9 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "rollback",
       description:
-        "Mark a previous deploy as the current 'last_good' for a domain. Phase 2 will " +
-        "actually push the rollback; Phase 1 just records intent.",
+        "Roll back a domain to a previous deploy. The orchestrator repoints the production " +
+        "alias to the target deploy (Cloudflare Pages typical propagation: ~8 seconds). " +
+        "Returns the propagation estimate so you can tell the user how long until live.",
       inputSchema: {
         type: "object",
         properties: {
@@ -151,7 +264,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "ship_site": {
         const input = ShipSiteInputSchema.parse(args ?? {});
         const uploadDir = uploadDirFor(`${input.domain}-${Date.now()}`);
-        // Note: shipSite internally generates the real deploy_id.
         const result = await shipSite({
           folder: input.folder,
           domain: input.domain,
@@ -173,10 +285,130 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           ...result,
           record,
           note: result.api_ok
-            ? "Deploy accepted by orchestrator."
+            ? "Deploy accepted by orchestrator. For follow-up edits use update_site (0.1 quota)."
             : "Local stage succeeded but orchestrator API was unreachable or returned an error. " +
               "The deploy is queued for retry; check `get_status` and `get_logs` for status.",
         });
+      }
+
+      case "get_current_site": {
+        const input = GetCurrentSiteInputSchema.parse(args ?? {});
+        const res = await fetchCurrentSite({
+          apiUrl: apiUrl(),
+          domain: input.domain,
+          includeContent: input.include_content,
+        });
+        if (!res.ok || !res.body) {
+          return toolError(
+            `get_current_site failed (status ${res.status}, source=${res.source}): ${res.raw}`,
+          );
+        }
+        // If include_content was true, ensure content field is present on every file.
+        const files =
+          input.include_content === false
+            ? res.body.files.map((f) => ({ path: f.path, size: f.size, sha256: f.sha256 }))
+            : res.body.files;
+        return toolResult({
+          domain: res.body.domain,
+          deploy_id: res.body.deploy_id,
+          created_at: res.body.created_at,
+          files,
+          source: res.source,
+          note:
+            "Next: construct an update_site patch using an exact substring of `content` " +
+            "for the file you want to edit. The patch's `find` must appear verbatim " +
+            "in the live file or the deploy will be rejected.",
+        });
+      }
+
+      case "update_site": {
+        const input = UpdateSiteInputSchema.parse(args ?? {});
+        // Build the manifest client-side (validates paths, dedupes targets).
+        const manifest = buildPatchManifest({
+          domain: input.domain,
+          patches: input.patches,
+          ...(input.message !== undefined ? { message: input.message } : {}),
+          ...(input.dry_run !== undefined ? { dry_run: input.dry_run } : {}),
+        });
+        const res = await postPatch({
+          apiUrl: apiUrl(),
+          manifest,
+          ...(process.env.KREXEL_API_KEY ? { apiKey: process.env.KREXEL_API_KEY } : {}),
+        });
+        if (!res.ok || !res.body) {
+          return toolError(
+            `update_site failed (status ${res.status}): ${res.raw}`,
+          );
+        }
+        const body = res.body;
+        // Persist the patch deploy locally for audit + rollback.
+        const record: DeployRecord = {
+          deploy_id: body.deploy_id,
+          domain: body.domain,
+          framework: "patch",
+          folder: "(patch)",
+          status: body.status,
+          preview_url: body.preview_url,
+          created_at: new Date().toISOString(),
+          parent_deploy_id: body.parent_deploy_id,
+          ...(body.message ? { message: body.message } : {}),
+        };
+        await appendDeploy(record);
+        return toolResult({
+          ...body,
+          // Always surface the quota constant so the LLM can tell the user
+          // their running total without doing math itself.
+          quota_used: body.quota_used ?? PATCH_QUOTA_COST,
+          record,
+          note: input.dry_run
+            ? "dry_run=true — no deploy was created."
+            : `Patch deploy created. Counts as ${PATCH_QUOTA_COST} against your monthly quota.`,
+        });
+      }
+
+      case "list_file_versions": {
+        const input = ListFileVersionsInputSchema.parse(args ?? {});
+        // Try the worker's dedicated endpoint first.
+        const res = await fetchFileVersions({
+          apiUrl: apiUrl(),
+          domain: input.domain,
+          file: input.file,
+          limit: input.limit,
+          ...(process.env.KREXEL_API_KEY ? { apiKey: process.env.KREXEL_API_KEY } : {}),
+        });
+        if (res.ok && res.body) {
+          return toolResult(res.body);
+        }
+        // TODO(worker-v2): when /api/v1/file-versions lands, the dedicated
+        // endpoint returns {deploy_id, parent_deploy_id, content, ...} and the
+        // client synthesizes unified diffs. Until then, fall back to whatever
+        // the worker /deploys endpoint returns for this domain and filter
+        // client-side — not file-aware yet but at least bounded.
+        const fallback = await listDeploysState(input.domain, input.limit);
+        const versions = fallback.map((d) => ({
+          deploy_id: d.deploy_id,
+          parent_deploy_id: (d as DeployRecord & { parent_deploy_id?: string | null })
+            .parent_deploy_id ?? null,
+          created_at: d.created_at,
+          ...(d.message ? { message: d.message } : {}),
+          content: null as string | null,
+        }));
+        return toolResult(
+          buildFileVersionsResponse({
+            domain: input.domain,
+            file: input.file,
+            versions,
+          }),
+          {
+            _meta: {
+              fallback: true,
+              worker_status: res.status,
+              worker_error: res.raw,
+              note: "file-specific worker endpoint not yet available; showing recent " +
+                "deploys for domain without diffs. TODO: replace when worker lands.",
+            },
+          },
+        );
       }
 
       case "list_deploys": {
@@ -191,10 +423,32 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (!deploy) {
           throw new Error(`No deploy found with id ${input.deploy_id}`);
         }
-        // Phase 1: mocked logs from local manifest. Real logs come from
-        // the orchestrator in Phase 2.
+        const apiRes = await fetchLogs({
+          apiUrl: apiUrl(),
+          deployId: input.deploy_id,
+          ...(process.env.KREXEL_API_KEY ? { apiKey: process.env.KREXEL_API_KEY } : {}),
+        });
+        if (apiRes.ok) {
+          // If the body is a plain string, ship it as text; if JSON, ship as-is.
+          if (typeof apiRes.body === "string") {
+            return toolResult({
+              deploy_id: input.deploy_id,
+              status: deploy.status,
+              logs: apiRes.body,
+              source: "orchestrator",
+            });
+          }
+          return toolResult({
+            deploy_id: input.deploy_id,
+            status: deploy.status,
+            logs: apiRes.body,
+            source: "orchestrator",
+          });
+        }
+        // Fallback: orchestrator unreachable. Return local manifest summary
+        // and mark clearly so the LLM knows the data isn't live.
         const lines: string[] = [
-          `[mock] Phase 1 logs — orchestrator streaming not yet wired.`,
+          `[fallback] Orchestrator unreachable (status ${apiRes.status}); showing local manifest summary.`,
           `deploy_id: ${deploy.deploy_id}`,
           `domain: ${deploy.domain}`,
           `framework: ${deploy.framework}`,
@@ -206,9 +460,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           deploy_id: deploy.deploy_id,
           status: deploy.status,
           logs: lines.join("\n"),
-          source: "local-mock",
-          note:
-            "Phase 2: this will return real build logs from the Krexel orchestrator.",
+          source: "local-fallback",
+          note: `Orchestrator logs endpoint returned status ${apiRes.status}. ` +
+            "Live streaming is preferred — retry, or check KREXEL_API_URL/auth.",
         });
       }
 
@@ -224,13 +478,51 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           );
         }
         const state = await readState();
-        state.last_good[input.domain] = input.to;
-        await updateDeploy(input.to, { status: "ready" });
-        return toolResult({
+        const fromDeployId = state.last_good[input.domain] ?? null;
+        // Call the worker (real alias switch). The worker is responsible for
+        // pointing the production alias at the target deploy.
+        const apiRes = await postRollback({
+          apiUrl: apiUrl(),
           domain: input.domain,
           to: input.to,
-          ok: true,
-          note: "Phase 1 records the rollback intent; Phase 2 will repoint the alias.",
+          ...(process.env.KREXEL_API_KEY ? { apiKey: process.env.KREXEL_API_KEY } : {}),
+        });
+        if (!apiRes.ok) {
+          return toolError(
+            `Rollback request failed (status ${apiRes.status}): ${apiRes.raw}`,
+          );
+        }
+        // Update local state regardless — the worker either succeeded or
+        // returned a meaningful error (which we already surfaced).
+        state.last_good[input.domain] = input.to;
+        await updateDeploy(input.to, { status: "ready" });
+        // The worker response shape per spec:
+        //   { domain, from_deploy_id, to_deploy_id, status, estimated_propagation_seconds }
+        const workerBody = apiRes.body as
+          | {
+              estimated_propagation_seconds?: number;
+              from_deploy_id?: string;
+              to_deploy_id?: string;
+              status?: string;
+            }
+          | string
+          | null;
+        const propagation =
+          typeof workerBody === "object" && workerBody !== null
+            ? (workerBody.estimated_propagation_seconds ?? 8)
+            : 8;
+        const fromReported =
+          typeof workerBody === "object" && workerBody !== null && workerBody.from_deploy_id
+            ? workerBody.from_deploy_id
+            : fromDeployId;
+        return toolResult({
+          domain: input.domain,
+          from_deploy_id: fromReported,
+          to_deploy_id: input.to,
+          status: typeof workerBody === "object" && workerBody?.status ? workerBody.status : "rolled_back",
+          estimated_propagation_seconds: propagation,
+          worker_response: workerBody,
+          note: `Live in ~${propagation}s.`,
         });
       }
 
@@ -258,7 +550,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           account: state.account,
           deploy_count: state.deploys.length,
           platform: process.platform,
-          api_url: process.env.KREXEL_API_URL ?? "http://localhost:8787",
+          api_url: apiUrl(),
           state_dir: krexelHome(),
         };
         return toolResult(report);
@@ -279,9 +571,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 });
 
-function toolResult(payload: unknown): { content: Array<{ type: "text"; text: string }> } {
+function toolResult(
+  payload: unknown,
+  extras?: Record<string, unknown>,
+): { content: Array<{ type: "text"; text: string }> } {
+  const merged = extras ? { ...(payload as object), ...extras } : payload;
   return {
-    content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
+    content: [{ type: "text", text: JSON.stringify(merged, null, 2) }],
   };
 }
 
