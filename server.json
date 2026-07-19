@@ -1,17 +1,17 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.Syfer-web/krexel-mcp",
-  "description": "Ship and edit static sites from any AI assistant that speaks MCP.",
+  "description": "Ship and edit static sites from any MCP-compatible AI. The AI is the brain; Krexel is the hands.",
   "repository": {
     "url": "https://github.com/Syfer-web/krexel-mcp",
     "source": "github"
   },
-  "version": "0.3.1",
+  "version": "0.3.3",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "krexel-mcp",
-      "version": "0.3.1",
+      "version": "0.3.3",
       "transport": {
         "type": "stdio"
       },
@@ -20,7 +20,7 @@
           "description": "Base URL of the Krexel orchestrator API.",
           "name": "KREXEL_API_URL",
           "is_required": false,
-          "default": "http://localhost:8787"
+          "default": "https://api.krexel.com"
         },
         {
           "description": "Account API key minted at krexel.com/signup. Forwarded as Authorization: Bearer *** to every API call. Required.",

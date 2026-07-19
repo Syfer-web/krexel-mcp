@@ -15,6 +15,9 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { ZodError } from "zod";
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   ShipSiteInputSchema,
@@ -47,9 +50,28 @@ import {
   type KrexelApiClient,
   type PatchOpWire,
 } from "./api-client.js";
+import { resolveApiUrl } from "./auth.js";
 
 const SERVER_NAME = "krexel-mcp";
-const SERVER_VERSION = "0.1.0";
+// Read from package.json so banner + Server init match the published version.
+// dist/index.js → ../package.json (production)
+// src/index.ts → ../../package.json (dev — tsx)
+function readServerVersion(): string {
+  const here = dirname(fileURLToPath(import.meta.url));
+  for (const p of [
+    resolve(here, "../package.json"),
+    resolve(here, "../../package.json"),
+  ]) {
+    try {
+      const json = JSON.parse(readFileSync(p, "utf8")) as { version?: string };
+      if (json.version) return json.version;
+    } catch {
+      // ignore — try next
+    }
+  }
+  return "0.0.0";
+}
+const SERVER_VERSION = readServerVersion();
 
 const server = new Server(
   { name: SERVER_NAME, version: SERVER_VERSION },
@@ -74,7 +96,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         properties: {
           folder: {
             type: "string",
-            description: "Absolute or ~-relative path to the built site directory.",
+            description:
+              "Absolute or ~-relative path to the built site directory.",
           },
           domain: {
             type: "string",
@@ -83,7 +106,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           framework: {
             type: "string",
             enum: ["auto", "nextjs", "astro", "vite", "static"],
-            description: "Build framework hint. Default 'auto' detects from package.json.",
+            description:
+              "Build framework hint. Default 'auto' detects from package.json.",
           },
         },
         required: ["folder", "domain"],
@@ -104,8 +128,9 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "get_logs",
       description:
-        "Get build logs for a deploy. In Phase 1 these are mocked from the local " +
-        "manifest; Phase 2 will stream from the orchestrator.",
+        "Get build logs for a deploy. As of 2026-07-19 this tool returns a " +
+        "structured 'no logs available' response from the local stdio MCP " +
+        "(the worker holds the authoritative logs; full impl lands in Release B).",
       inputSchema: {
         type: "object",
         properties: {
@@ -117,8 +142,9 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "rollback",
       description:
-        "Mark a previous deploy as the current 'last_good' for a domain. Phase 2 will " +
-        "actually push the rollback; Phase 1 just records intent.",
+        "Mark a previous deploy as the current 'last_good' for a domain. As of " +
+        "2026-07-19 this tool refuses the call: rollback in production requires the " +
+        "Krexel dashboard (wired in Release B).",
       inputSchema: {
         type: "object",
         properties: {
@@ -229,7 +255,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           message: {
             type: "string",
             maxLength: 500,
-            description: "Optional human-readable note stored with the patch deploy.",
+            description:
+              "Optional human-readable note stored with the patch deploy.",
           },
         },
         required: ["deploy_id", "op", "file"],
@@ -263,20 +290,38 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           ...(result.api_error ? { error: result.api_error } : {}),
         };
         await appendDeploy(record);
+        // 2026-07-19 Release A: the previous copy on api_ok=false
+        // was "The deploy is queued for retry; check get_status".
+        // There is no retry queue — the audit caught this as
+        // "fake queued-for-retry claim". Surface the orchestrator
+        // error verbatim and don't promise a retry that doesn't
+        // exist.
         return toolResult({
           ...result,
           record,
           note: result.api_ok
-            ? "Deploy accepted by orchestrator."
-            : "Local stage succeeded but orchestrator API was unreachable or returned an error. " +
-              "The deploy is queued for retry; check `get_status` and `get_logs` for status.",
+            ? "Deploy accepted by orchestrator. Verify with list_deploys against the Krexel dashboard or REST API; the local state file is a staging-only artifact until Release C."
+            : result.api_error
+              ? `Orchestrator call failed: ${result.api_error}`
+              : "Orchestrator call failed with no error detail. No retry queue exists; this surface does not store a queued-for-retry promise.",
         });
       }
 
       case "list_deploys": {
         const input = ListDeploysInputSchema.parse(args ?? {});
+        // 2026-07-19 Release A: the previous implementation
+        // returned rows from a local state file. The audit caught
+        // this as fake production-history. Until the unified
+        // application service (Release C) ships, surface a
+        // banner pointing the caller at the dashboard API.
         const rows = await listDeploysState(input.domain, input.limit);
-        return toolResult({ deploys: rows, count: rows.length });
+        return toolResult({
+          deploys: rows,
+          count: rows.length,
+          source: "staging-state-only",
+          note:
+            "These rows come from a local staging manifest (Phase 1). Authoritative deployment history lives at the Krexel REST API and dashboard. Use `krexel deploys` or GET /api/v1/deploys against api.krexel.com for production history.",
+        });
       }
 
       case "get_logs": {
@@ -285,24 +330,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (!deploy) {
           throw new Error(`No deploy found with id ${input.deploy_id}`);
         }
-        // Phase 1: mocked logs from local manifest. Real logs come from
-        // the orchestrator in Phase 2.
-        const lines: string[] = [
-          `[mock] Phase 1 logs — orchestrator streaming not yet wired.`,
-          `deploy_id: ${deploy.deploy_id}`,
-          `domain: ${deploy.domain}`,
-          `framework: ${deploy.framework}`,
-          `status: ${deploy.status}`,
-          `created_at: ${deploy.created_at}`,
-        ];
-        if (deploy.error) lines.push(`error: ${deploy.error}`);
+        // 2026-07-19 Release A: don't return mocked log lines.
+        // The audit caught this as fake data. Real logs live at
+        // the worker (GET /api/v1/deploys/:id/logs once Release B
+        // lands). Until then, return a structured "no logs yet"
+        // payload with no fabricated `[mock]` text.
         return toolResult({
           deploy_id: deploy.deploy_id,
           status: deploy.status,
-          logs: lines.join("\n"),
-          source: "local-mock",
+          logs: "",
+          available: false,
+          source: "staging-state-only",
           note:
-            "Phase 2: this will return real build logs from the Krexel orchestrator.",
+            "Build logs are not available from the local stdio MCP today. The Krexel Worker holds the authoritative logs; this endpoint will be wired to it in Release B/C.",
         });
       }
 
@@ -317,14 +357,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             `Cannot rollback: deploy ${input.to} belongs to ${target.domain}, not ${input.domain}`,
           );
         }
-        const state = await readState();
-        state.last_good[input.domain] = input.to;
-        await updateDeploy(input.to, { status: "ready" });
+        // 2026-07-19 Release A: don't pretend to roll back. The
+        // previous path wrote `state.last_good[domain] = to` and
+        // marked the deploy ready in the local state file. The
+        // audit caught this as "Phase 1 records intent only".
+        // Until the unified application service can repoint the
+        // live alias, refuse the call with a structured error
+        // pointing the user at the dashboard rollback button.
         return toolResult({
           domain: input.domain,
           to: input.to,
-          ok: true,
-          note: "Phase 1 records the rollback intent; Phase 2 will repoint the alias.",
+          ok: false,
+          available: false,
+          note:
+            "Rollback is not implemented in the local stdio MCP today. Use the Krexel dashboard Site Deploys tab to roll back; that action is wired to the Worker in Release B.",
         });
       }
 
@@ -352,7 +398,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           account: state.account,
           deploy_count: state.deploys.length,
           platform: process.platform,
-          api_url: process.env.KREXEL_API_URL ?? "http://localhost:8787",
+          api_url: resolveApiUrl(),
           state_dir: krexelHome(),
         };
         // Bug #2 fix: round-trip /me so the user can see "key valid for
@@ -367,10 +413,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             ? {
                 email: me.data.email,
                 plan: me.data.plan,
-                cloudflare_connected: me.data.cloudflare_connected,
-                ...(me.data.cloudflare_account_id
-                  ? { cloudflare_account_id: me.data.cloudflare_account_id }
-                  : {}),
                 source: "worker",
               }
             : {
@@ -378,7 +420,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 note:
                   "KREXEL_API_KEY is not set or the worker rejected it. " +
                   "Run `krexel login` to link a key, then restart your AI client.",
-                worker_error: me.ok ? null : { status: me.status, error: me.error, message: me.message },
+                worker_error: me.ok
+                  ? null
+                  : { status: me.status, error: me.error, message: me.message },
               },
         });
       }
@@ -448,7 +492,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         let patch: PatchOpWire;
         switch (input.op) {
           case "create":
-            patch = { op: "create", file: input.file, content: newContent ?? "" };
+            patch = {
+              op: "create",
+              file: input.file,
+              content: newContent ?? "",
+            };
             break;
           case "replace":
             patch = {
@@ -506,7 +554,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     }
   } catch (err) {
     if (err instanceof ZodError) {
-      return toolError(`Invalid arguments: ${err.issues.map((i) => i.message).join("; ")}`);
+      return toolError(
+        `Invalid arguments: ${err.issues.map((i) => i.message).join("; ")}`,
+      );
     }
     if (err instanceof MissingMasterKeyError) {
       return toolError(err.message);
@@ -516,7 +566,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 });
 
-function toolResult(payload: unknown): { content: Array<{ type: "text"; text: string }> } {
+function toolResult(payload: unknown): {
+  content: Array<{ type: "text"; text: string }>;
+} {
   return {
     content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
   };
@@ -527,7 +579,8 @@ function toolError(payload: ToolErrorPayload): {
   isError: true;
   content: Array<{ type: "text"; text: string }>;
 } {
-  const text = typeof payload === "string" ? payload : JSON.stringify(payload, null, 2);
+  const text =
+    typeof payload === "string" ? payload : JSON.stringify(payload, null, 2);
   return { isError: true, content: [{ type: "text", text }] };
 }
 
@@ -552,10 +605,14 @@ async function main(): Promise<void> {
   const transport = new StdioServerTransport();
   await server.connect(transport);
   // Logs must go to stderr — stdout is the JSON-RPC channel.
-  process.stderr.write(`[krexel-mcp] ${SERVER_NAME} v${SERVER_VERSION} ready (state: ${krexelHome()})\n`);
+  process.stderr.write(
+    `[krexel-mcp] ${SERVER_NAME} v${SERVER_VERSION} ready (state: ${krexelHome()})\n`,
+  );
 }
 
 main().catch((err) => {
-  process.stderr.write(`[krexel-mcp] fatal: ${err instanceof Error ? err.stack ?? err.message : String(err)}\n`);
+  process.stderr.write(
+    `[krexel-mcp] fatal: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`,
+  );
   process.exit(1);
 });

@@ -24,6 +24,7 @@ import {
   FolderMissingError,
   detectFramework,
   generateDeployId,
+  projectNameForDomain,
   shipSite,
   uploadToApi,
   verifyFolder,
@@ -51,6 +52,11 @@ function makeSiteFolder(dir: string, withPackageJson?: Record<string, unknown>):
   }
   return dir;
 }
+
+test("projectNameForDomain produces a worker-compatible project slug", () => {
+  assert.equal(projectNameForDomain("Shop.Example.COM"), "shop-example-com");
+  assert.equal(projectNameForDomain("---"), "site");
+});
 
 // ---------------------------------------------------------------------------
 // generateDeployId

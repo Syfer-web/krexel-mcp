@@ -1,6 +1,6 @@
 {
   "name": "krexel-mcp",
-  "version": "0.3.1",
+  "version": "0.3.3",
   "description": "MCP server for Krexel — ship AND edit static sites from any AI assistant that speaks MCP. Your AI is the brain, Krexel is the hands.",
   "repository": {
     "type": "git",

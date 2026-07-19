@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { createWriteStream } from "node:fs";
 import { customAlphabet } from "nanoid";
 import { FormData } from "undici";
+import { resolveApiKey, resolveApiUrl } from "./auth.js";
 
 /**
  * ship_site core: zip a folder, write manifest, attempt to upload to the
@@ -14,14 +15,28 @@ import { FormData } from "undici";
  * alphabet so it's safe to use as an R2 key prefix without escaping.
  */
 
-const ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+const ALPHABET =
+  "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 const newId = customAlphabet(ALPHABET, 16);
 
 export function generateDeployId(): string {
   return `dep_${newId()}`;
 }
 
-export function detectFramework(folder: string): "nextjs" | "astro" | "vite" | "static" {
+/** Convert a hostname into the worker's lowercase Pages project slug. */
+export function projectNameForDomain(domain: string): string {
+  const normalized = domain
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 40);
+  return normalized || "site";
+}
+
+export function detectFramework(
+  folder: string,
+): "nextjs" | "astro" | "vite" | "static" {
   const pkg = path.join(folder, "package.json");
   if (existsSync(pkg)) {
     try {
@@ -90,7 +105,10 @@ interface ZipEntry {
  * Limitations: STORE only, no zip64, no encryption, one entry per file.
  * Fine for Phase 1 (deploy payloads are <500MB typical).
  */
-export async function zipFolder(folder: string, outPath: string): Promise<number> {
+export async function zipFolder(
+  folder: string,
+  outPath: string,
+): Promise<number> {
   await fs.mkdir(path.dirname(outPath), { recursive: true });
 
   // Pass 1: gather all files and compute per-entry local-header offsets.
@@ -186,7 +204,10 @@ export async function zipFolder(folder: string, outPath: string): Promise<number
   return st.size;
 }
 
-async function writeAll(stream: ReturnType<typeof createWriteStream>, parts: Buffer[]): Promise<void> {
+async function writeAll(
+  stream: ReturnType<typeof createWriteStream>,
+  parts: Buffer[],
+): Promise<void> {
   for (const part of parts) {
     if (stream.write(part)) continue;
     await new Promise<void>((resolve) => stream.once("drain", () => resolve()));
@@ -262,6 +283,7 @@ export async function uploadToApi(opts: ApiUploadOpts): Promise<ApiResponse> {
         {
           deploy_id: opts.deployId,
           domain: opts.domain,
+          projectName: projectNameForDomain(opts.domain),
           framework: opts.framework,
           zip_filename: path.basename(opts.zipPath),
           zip_bytes: opts.zipBytes.length,
@@ -273,11 +295,15 @@ export async function uploadToApi(opts: ApiUploadOpts): Promise<ApiResponse> {
     ]),
     "manifest.json",
   );
-  form.append("file", new Blob([new Uint8Array(opts.zipBytes)]), path.basename(opts.zipPath));
+  form.append(
+    "file",
+    new Blob([new Uint8Array(opts.zipBytes)]),
+    path.basename(opts.zipPath),
+  );
   // Bug #1 fix: the worker requires `Authorization: Bearer <KREXEL_API_KEY>`
   // on every authed endpoint. The MCP server is spawned with the user's key
   // in its env, so we forward it here.
-  const apiKey = opts.apiKey ?? process.env.KREXEL_API_KEY ?? "";
+  const apiKey = opts.apiKey ?? resolveApiKey();
   const headers: Record<string, string> = {};
   if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
   try {
@@ -319,7 +345,9 @@ export interface ShipSiteArgs {
 export async function shipSite(args: ShipSiteArgs): Promise<ShipResult> {
   const resolvedFolder = verifyFolder(args.folder);
   const framework =
-    args.framework === "auto" ? detectFramework(resolvedFolder) : args.framework;
+    args.framework === "auto"
+      ? detectFramework(resolvedFolder)
+      : args.framework;
   const deployId = generateDeployId();
   const uploadDir = args.uploadDir;
   await fs.mkdir(uploadDir, { recursive: true });
@@ -342,7 +370,7 @@ export async function shipSite(args: ShipSiteArgs): Promise<ShipResult> {
     "utf8",
   );
 
-  const apiUrl = process.env.KREXEL_API_URL ?? "http://localhost:8787";
+  const apiUrl = resolveApiUrl();
   const zipBuffer = await fs.readFile(zipPath);
   const apiRes = await uploadToApi({
     apiUrl,
@@ -363,7 +391,9 @@ export async function shipSite(args: ShipSiteArgs): Promise<ShipResult> {
     zip_bytes: zipBytes,
     api_attempted: true,
     api_ok: apiRes.ok,
-    api_error: apiRes.ok ? null : `Orchestrator returned ${apiRes.status}: ${apiRes.raw}`,
+    api_error: apiRes.ok
+      ? null
+      : `Orchestrator returned ${apiRes.status}: ${apiRes.raw}`,
     api_response: apiRes.body,
   };
 }

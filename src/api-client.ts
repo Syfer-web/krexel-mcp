@@ -14,6 +14,8 @@
  * headers/URLs/body without ever opening a socket.
  */
 
+import { resolveApiKey, resolveApiUrl } from "./auth.js";
+
 export interface KrexelApiClientOpts {
   apiUrl: string;
   /** Bearer token to send on every request. If empty, calls still go out but the worker will 401. */
@@ -45,8 +47,6 @@ export interface MeResponse {
   email: string;
   plan: string;
   created_at: string;
-  cloudflare_connected: boolean;
-  cloudflare_account_id?: string;
 }
 
 export interface DeploySummary {
@@ -99,10 +99,7 @@ export interface PatchOpDelete {
   file: string;
 }
 export type PatchOpWire =
-  | PatchOpCreate
-  | PatchOpReplace
-  | PatchOpReplaceAll
-  | PatchOpDelete;
+  PatchOpCreate | PatchOpReplace | PatchOpReplaceAll | PatchOpDelete;
 
 export interface PatchDeployRequest {
   domain: string;
@@ -148,9 +145,16 @@ export class KrexelApiClient {
   /** GET /api/v1/deploys/:id — single deploy record (gives us `domain`). */
   async getDeploy(deployId: string): Promise<ApiResult<DeploySummary>> {
     if (!isDeployId(deployId)) {
-      return this.err(400, "invalid_id", "deploy id must match dep_<base36>_<base36>");
+      return this.err(
+        400,
+        "invalid_id",
+        "deploy id must match dep_<base36>_<base36>",
+      );
     }
-    return this.request<DeploySummary>("GET", `/api/v1/deploys/${encodeURIComponent(deployId)}`);
+    return this.request<DeploySummary>(
+      "GET",
+      `/api/v1/deploys/${encodeURIComponent(deployId)}`,
+    );
   }
 
   /**
@@ -160,7 +164,11 @@ export class KrexelApiClient {
    */
   async listFiles(deployId: string): Promise<ApiResult<FilesResponse>> {
     if (!isDeployId(deployId)) {
-      return this.err(400, "invalid_id", "deploy id must match dep_<base36>_<base36>");
+      return this.err(
+        400,
+        "invalid_id",
+        "deploy id must match dep_<base36>_<base36>",
+      );
     }
     return this.request<FilesResponse>(
       "GET",
@@ -177,9 +185,22 @@ export class KrexelApiClient {
   async readFile(
     deployId: string,
     path: string,
-  ): Promise<ApiResult<{ deploy_id: string; path: string; content: string; sha256: string; size: number; domain: string }>> {
+  ): Promise<
+    ApiResult<{
+      deploy_id: string;
+      path: string;
+      content: string;
+      sha256: string;
+      size: number;
+      domain: string;
+    }>
+  > {
     if (!isDeployId(deployId)) {
-      return this.err(400, "invalid_id", "deploy id must match dep_<base36>_<base36>");
+      return this.err(
+        400,
+        "invalid_id",
+        "deploy id must match dep_<base36>_<base36>",
+      );
     }
     const pathErr = validateFilePath(path);
     if (pathErr) return this.err(400, "invalid_path", pathErr);
@@ -228,18 +249,37 @@ export class KrexelApiClient {
     req: PatchDeployRequest,
   ): Promise<ApiResult<PatchDeployResponse>> {
     if (!isDeployId(req.base_deploy_id)) {
-      return this.err(400, "invalid_id", "base_deploy_id must match dep_<base36>_<base36>");
+      return this.err(
+        400,
+        "invalid_id",
+        "base_deploy_id must match dep_<base36>_<base36>",
+      );
     }
     if (!req.domain || typeof req.domain !== "string") {
       return this.err(400, "invalid_domain", "domain is required");
     }
     if (!Array.isArray(req.patches) || req.patches.length === 0) {
-      return this.err(400, "invalid_patches", "patches must be a non-empty array");
+      return this.err(
+        400,
+        "invalid_patches",
+        "patches must be a non-empty array",
+      );
     }
-    if (req.message !== undefined && (typeof req.message !== "string" || req.message.length > 500)) {
-      return this.err(400, "invalid_message", "message must be a string of <= 500 chars");
+    if (
+      req.message !== undefined &&
+      (typeof req.message !== "string" || req.message.length > 500)
+    ) {
+      return this.err(
+        400,
+        "invalid_message",
+        "message must be a string of <= 500 chars",
+      );
     }
-    return this.request<PatchDeployResponse>("POST", "/api/v1/deploy/patch", req);
+    return this.request<PatchDeployResponse>(
+      "POST",
+      "/api/v1/deploy/patch",
+      req,
+    );
   }
 
   // ---- internals ----------------------------------------------------------
@@ -268,7 +308,11 @@ export class KrexelApiClient {
     try {
       res = await this.fetcher(url, { method, headers, body });
     } catch (err) {
-      return this.err(0, "network_error", err instanceof Error ? err.message : String(err));
+      return this.err(
+        0,
+        "network_error",
+        err instanceof Error ? err.message : String(err),
+      );
     }
     const raw = await res.text();
     let parsed: unknown = raw;
@@ -292,7 +336,12 @@ export class KrexelApiClient {
     return { ok: true, status: res.status, data: parsed as T };
   }
 
-  private err(status: number, code: string, message: string, body: unknown = null): ApiErr {
+  private err(
+    status: number,
+    code: string,
+    message: string,
+    body: unknown = null,
+  ): ApiErr {
     return { ok: false, status, error: code, message, body };
   }
 }
@@ -322,7 +371,7 @@ export function validateFilePath(p: string): string | null {
 /** Factory matching how the worker reads its env, exposed for handlers/tests. */
 export function defaultKrexelApiClient(): KrexelApiClient {
   return new KrexelApiClient({
-    apiUrl: process.env.KREXEL_API_URL ?? "http://localhost:8787",
-    apiKey: process.env.KREXEL_API_KEY ?? "",
+    apiUrl: resolveApiUrl(),
+    apiKey: resolveApiKey(),
   });
 }

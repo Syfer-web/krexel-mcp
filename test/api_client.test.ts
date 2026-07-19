@@ -100,7 +100,6 @@ test("getMe forwards `Authorization: Bearer <key>` on every request", async () =
     jsonResponse(200, {
       email: "user@test.com",
       plan: "builder",
-      cloudflare_connected: true,
       created_at: "2026-01-01T00:00:00Z",
     }),
   );

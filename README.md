@@ -33,17 +33,17 @@ Restart your client. The assistant now sees nine Krexel tools.
 
 ## Tools
 
-| Tool           | What it does                                                                |
-|----------------|-----------------------------------------------------------------------------|
-| `ship_site`    | Upload a built site folder. Returns a `deploy_id` and preview URL.          |
+| Tool           | What it does                                                                 |
+| -------------- | ---------------------------------------------------------------------------- |
+| `ship_site`    | Upload a built site folder. Returns a `deploy_id` and preview URL.           |
 | `edit_file`    | Patch a deployed site (create / replace / replace_all / delete). 0.1 deploy. |
-| `list_files`   | List the files in a deployed site (path + size + sha256).                   |
-| `read_file`    | Read one file's content from a deployed site.                               |
-| `list_deploys` | List recent deploys from local state. Optional domain filter.               |
-| `get_logs`     | Fetch build logs for a deploy.                                              |
-| `rollback`     | Mark a previous deploy as the current good version.                         |
-| `set_env`      | Encrypt and persist an env var for a domain (AES-256-GCM).                  |
-| `get_status`   | Return account, deploy count, plan, and state directory.                    |
+| `list_files`   | List the files in a deployed site (path + size + sha256).                    |
+| `read_file`    | Read one file's content from a deployed site.                                |
+| `list_deploys` | List recent deploys from local state. Optional domain filter.                |
+| `get_logs`     | Fetch build logs for a deploy.                                               |
+| `rollback`     | Mark a previous deploy as the current good version.                          |
+| `set_env`      | Encrypt and persist an env var for a domain (AES-256-GCM).                   |
+| `get_status`   | Return account, deploy count, plan, and state directory.                     |
 
 ### The conversational-edit flow
 
@@ -62,11 +62,11 @@ discoverable via the standard MCP `tools/list` request.
 
 ## Configuration
 
-| Env var               | Required | Default              | Notes                                          |
-|-----------------------|----------|----------------------|------------------------------------------------|
-| `KREXEL_API_URL`      | no       | `http://localhost:8787` | Base URL of the Krexel orchestrator API.     |
-| `KREXEL_API_KEY`      | yes      | —                    | Account API key (minted at krexel.com/signup). Forwarded as `Authorization: Bearer *** to every API call. |
-| `KREXEL_MASTER_KEY`   | yes*     | —                    | 32-byte hex string for env-var encryption. *Required for `set_env`. |
+| Env var             | Required | Default                  | Notes                                                                                                     |
+| ------------------- | -------- | ------------------------ | --------------------------------------------------------------------------------------------------------- |
+| `KREXEL_API_URL`    | no       | `https://api.krexel.com` | Base URL of the Krexel orchestrator API.                                                                  |
+| `KREXEL_API_KEY`    | no*      | `~/.krexel/auth.json`    | Account API key. Forwarded as `Authorization: Bearer ***` to every API call. *Required unless saved by `krexel login`. |
+| `KREXEL_MASTER_KEY` | yes*     | —                        | 32-byte hex string for env-var encryption. *Required for `set_env`.                                       |
 
 State files are written under `$KREXEL_HOME` (default `~/.krexel/`).
 
